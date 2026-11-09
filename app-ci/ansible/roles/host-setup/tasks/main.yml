@@ -1,0 +1,87 @@
+
+# ansible/roles/host-setup/tasks/main.yml
+
+# ============================================================
+# DAY 0 — provisioning initial, une seule fois par machine
+# ============================================================
+- name: Vérifier si Docker est déjà installé
+  ansible.builtin.command: which docker
+  register: docker_check
+  changed_when: false
+  failed_when: false
+  tags: [provisioning, docker]
+
+- name: Installer Docker si absent
+  ansible.builtin.apt:
+    name: docker.io
+    state: present
+    update_cache: true
+  become: true
+  when: docker_check.rc != 0
+  tags: [provisioning, docker]
+
+- name: Vérifier si Minikube est déjà installé
+  ansible.builtin.stat:
+    path: /usr/local/bin/minikube
+  register: minikube_bin
+  tags: [provisioning, minikube-install]
+
+- name: Installer Minikube
+  ansible.builtin.shell: |
+    curl -Lo minikube https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+    install minikube /usr/local/bin/minikube
+  args:
+    creates: /usr/local/bin/minikube
+  become: true
+  when: not minikube_bin.stat.exists
+  tags: [provisioning, minikube-install]
+
+- name: Vérifier si un conteneur Jenkins tourne déjà
+  ansible.builtin.command: >
+    docker ps --filter "name=jenkins"
+    --filter "status=running"
+    --format "{{ '{{' }}.Names{{ '}}' }}"
+  register: jenkins_running
+  changed_when: false
+  tags: [provisioning, jenkins]
+
+- name: Lancer Jenkins en conteneur si aucun n'est actif
+  community.docker.docker_container:
+    name: jenkins
+    image: jenkins/jenkins:lts
+    state: started
+    restart_policy: unless-stopped
+    ports:
+      - "8080:8080"
+      - "50000:50000"
+    volumes:
+      - jenkins_home:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock
+  when: jenkins_running.stdout == ""
+  tags: [provisioning, jenkins]
+
+# ============================================================
+# DAY 2 — gestion du quotidien, à chaque session
+# ============================================================
+
+- name: Vérifier l'état de Minikube
+  ansible.builtin.command: minikube status
+  register: mk_status
+  changed_when: false
+  failed_when: false
+  tags: [minikube]
+
+- name: Démarrer Minikube si nécessaire
+  ansible.builtin.command: minikube start
+  when: "'Running' not in mk_status.stdout"
+  tags: [minikube]
+
+- name: Activer les addons Minikube requis
+  ansible.builtin.command: >
+    minikube addons enable {{ item }}
+  loop: "{{ minikube_addons }}"
+  register: addon_result
+  changed_when: >
+    'already enabled' not in
+    addon_result.stdout | default('')
+  tags: [minikube]

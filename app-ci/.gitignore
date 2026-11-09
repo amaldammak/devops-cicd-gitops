@@ -1,0 +1,5 @@
+.env
+evaluation-clinisys-core/target/
+evaluation-clinisys-web/node_modules/
+*.save
+.vault_pass

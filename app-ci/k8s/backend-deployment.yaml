@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: satisfaction-core
+  namespace: satisfaction-evaluation
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: satisfaction-core
+  template:
+    metadata:
+      labels:
+        app: satisfaction-core
+    spec:
+      containers:
+        - name: satisfaction-core
+          image: amaldammak/satisfaction-core:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8050
+              name: http
+
+          envFrom:
+            - configMapRef:
+                name: app-config
+            - secretRef:
+                name: db-credentials
+
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "768Mi"
+            limits:
+              cpu: "1000m"
+              memory: "768Mi"
+
+          # Pas de probes pour l'instant : le pod ne sera jamais tué,
+          # ce qui nous laisse le temps d'observer les vrais logs.
+# apiVersion: apps/v1
+# kind: Deployment
+# metadata:
+#   name: satisfaction-core
+#   namespace: satisfaction-evaluation
+# spec:
+#   replicas: 2
+#   selector:
+#     matchLabels:
+#       app: satisfaction-core
+#   template:
+#     metadata:
+#       labels:
+#         app: satisfaction-core
+#     spec:
+#       containers:
+#         - name: satisfaction-core
+#           image: amaldammak/satisfaction-core:latest
+#           imagePullPolicy: IfNotPresent
+#           ports:
+#             - containerPort: 8050
+#               name: http
+
+#           envFrom:
+#             - configMapRef:
+#                 name: app-config
+#             - secretRef:
+#                 name: db-credentials
+
+#           env:
+#             - name: JAVA_TOOL_OPTIONS
+#               value: "-Xms256m -Xmx700m -XX:MaxMetaspaceSize=200m -Dhttps.protocols=TLSv1,TLSv1.1,TLSv1.2 -Djdk.tls.client.protocols=TLSv1,TLSv1.1,TLSv1.2"
+
+#           resources:
+#             requests:
+#               cpu: "500m"
+#               memory: "1024Mi"
+#             limits:
+#               cpu: "1000m"
+#               memory: "1024Mi"
+
+#           startupProbe:
+#             httpGet:
+#               path: /satisfaction-core/actuator/health/readiness
+#               port: 8050
+#             periodSeconds: 10
+#             timeoutSeconds: 3
+#             failureThreshold: 72   # 72 x 10s = 12 minutes de marge au démarrage
+
+#           livenessProbe:
+#             httpGet:
+#               path: /satisfaction-core/actuator/health/liveness
+#               port: 8050
+#             periodSeconds: 15
+#             timeoutSeconds: 3
+#             failureThreshold: 5
+
+#           readinessProbe:
+#             httpGet:
+#               path: /satisfaction-core/actuator/health/readiness
+#               port: 8050
+#             periodSeconds: 10
+#             timeoutSeconds: 3
+#             failureThreshold: 5

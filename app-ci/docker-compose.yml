@@ -1,0 +1,30 @@
+version: "3.8"
+
+services:
+  backend:
+    build:
+      context: ./evaluation-clinisys-core
+    image: satisfaction-core:${TAG:-latest}
+    container_name: backend_satisfaction_core
+    restart: always
+    ports:
+      - "8085:8050"
+    networks:
+      - satisfaction-network
+
+  frontend:
+    build:
+      context: ./evaluation-clinisys-web
+    image: satisfaction-web:${TAG:-latest}
+    container_name: web_satisfaction_web
+    restart: always
+    ports:
+      - "8084:80"
+    depends_on:
+      - backend
+    networks:
+      - satisfaction-network
+
+networks:
+  satisfaction-network:
+    driver: bridge

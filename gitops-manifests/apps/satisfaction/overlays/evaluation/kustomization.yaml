@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: satisfaction-evaluation
+resources:
+- ../../base
+configMapGenerator:
+- behavior: merge
+  literals:
+  - DB_HOST=192.168.0.107
+  - DB_PORT=1415
+  - DB_NAME=support
+  - DB_USER=sa
+  name: app-config
+images:
+- name: amaldammak/satisfaction-core
+  newName: amaldammak/satisfaction-core
+  newTag: "1.0.0"
+- name: satisfaction-front
+  newName: amaldammak/satisfaction-front
+  newTag: "1.0.0"
+replicas:
+- count: 2
+  name: satisfaction-core
+- count: 2
+  name: satisfaction-web

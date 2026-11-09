@@ -1,0 +1,161 @@
+# ansible/roles/gitops-bootstrap/tasks/main.yml
+# REMPLACE l'ancien rôle "deploy-satisfaction" en intégralité.
+# Ansible n'installe plus jamais le namespace/configmap/secret/deployments
+# directement : il installe ArgoCD une seule fois, puis délègue tout le
+# contenu applicatif au repo satisfaction-gitops.
+
+# ============================================================
+# 1. Namespace argocd
+# ============================================================
+- name: Vérifier si le namespace argocd existe
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Namespace
+    name: argocd
+  register: argocd_ns_check
+  tags: [gitops, argocd]
+
+- name: Créer le namespace argocd
+  kubernetes.core.k8s:
+    name: argocd
+    api_version: v1
+    kind: Namespace
+    state: present
+  when: argocd_ns_check.resources | length == 0
+  tags: [gitops, argocd]
+
+# ============================================================
+# 2. Installation ArgoCD (server-side pour éviter l'erreur
+#    "annotation may not be more than 262144 bytes" sur les CRDs)
+# ============================================================
+- name: Installer / mettre à jour ArgoCD (server-side apply)
+  kubernetes.core.k8s:
+    state: present
+    namespace: argocd
+    src: "https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml"
+    apply: true
+    server_side_apply:
+      field_manager: ansible-gitops-bootstrap
+      force_conflicts: true
+  tags: [gitops, argocd]
+
+- name: Attendre que argocd-server soit prêt
+  kubernetes.core.k8s_info:
+    kind: Deployment
+    name: argocd-server
+    namespace: argocd
+    wait: true
+    wait_condition: { type: Available, status: "True" }
+    wait_timeout: 300
+  tags: [gitops, argocd]
+
+# ============================================================
+# 3. Credentials du repo GitLab privé (obligatoire, sinon
+#    ArgoCD ne peut pas lire satisfaction-gitops : "Unknown" sync status)
+# ============================================================
+- name: Déclarer les credentials du repo GitOps à ArgoCD
+  kubernetes.core.k8s:
+    state: present
+    namespace: argocd
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: satisfaction-gitops-repo
+        namespace: argocd
+        labels:
+          argocd.argoproj.io/secret-type: repository
+      stringData:
+        type: git
+        url: "{{ gitops_repo_url }}"
+        username: "{{ gitops_repo_username }}"
+        password: "{{ vault_gitops_repo_token }}"
+  no_log: true   # évite d'afficher le token dans les logs Ansible
+  tags: [gitops, argocd, secrets]
+
+# ============================================================
+# 4. Déclarer l'Application ArgoCD satisfaction-evaluation
+#    (le contenu réel des manifests vit dans le repo GitOps, pas ici)
+# ============================================================
+- name: Appliquer l'Application ArgoCD satisfaction-evaluation
+  kubernetes.core.k8s:
+    state: present
+    namespace: argocd
+    src: "{{ playbook_dir }}/../satisfaction-gitops/argocd/application-evaluation.yaml"
+  tags: [gitops, deploy]
+
+# ============================================================
+# 5. Attente de disponibilité (ArgoCD a fait le sync, on vérifie juste
+#    — Ansible ne déploie plus rien lui-même)
+# ============================================================
+- name: Attendre que satisfaction-core soit disponible
+  kubernetes.core.k8s_info:
+    kind: Deployment
+    name: satisfaction-core
+    namespace: "{{ namespace }}"
+    wait: true
+    wait_condition: { type: Available, status: "True" }
+    wait_timeout: 180
+  tags: [gitops, deploy]
+
+- name: Attendre que satisfaction-web soit disponible
+  kubernetes.core.k8s_info:
+    kind: Deployment
+    name: satisfaction-web
+    namespace: "{{ namespace }}"
+    wait: true
+    wait_condition: { type: Available, status: "True" }
+    wait_timeout: 120
+  tags: [gitops, deploy]
+# ansible/roles/gitops-bootstrap/tasks/main.yml
+# REMPLACE l'ancien rôle "deploy-satisfaction" en intégralité.
+# Ansible n'installe plus jamais le namespace/configmap/secret/deployments
+# directement : il installe ArgoCD une seule fois, puis délègue tout le
+# contenu applicatif au repo satisfaction-gitops.
+
+# ============================================================
+# 1. Namespace argocd
+# ============================================================
+- name: Vérifier si le namespace argocd existe
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Namespace
+    name: argocd
+  register: argocd_ns_check
+  tags: [gitops, argocd]
+
+- name: Créer le namespace argocd
+  kubernetes.core.k8s:
+    name: argocd
+    api_version: v1
+    kind: Namespace
+    state: present
+  when: argocd_ns_check.resources | length == 0
+  tags: [gitops, argocd]
+
+# ============================================================
+# 2. Installation ArgoCD (server-side pour éviter l'erreur
+#    "annotation may not be more than 262144 bytes" sur les CRDs)
+# ============================================================
+- name: Installer / mettre à jour ArgoCD (server-side apply)
+  kubernetes.core.k8s:
+    state: present
+    namespace: argocd
+    src: "https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml"
+    apply: true
+    server_side_apply:
+      field_manager: ansible-gitops-bootstrap
+      force_conflicts: true
+  tags: [gitops, argocd]
+
+- name: Attendre que argocd-server soit prêt
+  kubernetes.core.k8s_info:
+    kind: Deployment
+    name: argocd-server
+    namespace: argocd
+    wait: true
+    wait_condition: { type: Available, status: "True" }
+    wait_timeout: 300
+  tags: [gitops, argocd]
+
+

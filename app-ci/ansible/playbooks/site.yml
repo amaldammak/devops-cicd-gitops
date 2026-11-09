@@ -1,0 +1,13 @@
+# ansible/playbook.yml
+- name: Préparer l'hôte et bootstrapper le GitOps
+  hosts: k8s_control
+  gather_facts: no
+
+  roles:
+    - role: host-setup          # INCHANGÉ : Docker, Minikube, Jenkins (Day 0 / Day 2)
+      tags: [setup]
+    - role: gitops-bootstrap    # REMPLACE deploy-satisfaction : installe ArgoCD + Application
+      tags: [deploy]
+
+  # SUPPRIMÉ : les handlers "rollout restart backend/frontend"
+  # ArgoCD gère les rollouts via son reconciliation loop (selfHeal: true).

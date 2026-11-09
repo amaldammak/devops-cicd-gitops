@@ -1,0 +1,16 @@
+# ansible/inventory/local/group_vars/all.yml
+---
+namespace: satisfaction-evaluation
+server_port: 8050
+db_host: 192.168.0.107
+db_port: 1415
+db_name: support
+db_user: sa
+
+image_backend: amaldammak/satisfaction-core
+image_frontend: satisfaction-front
+image_tag: latest
+
+replicas_backend: 2
+replicas_frontend: 2
+

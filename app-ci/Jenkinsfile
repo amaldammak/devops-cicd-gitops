@@ -1,0 +1,264 @@
+pipeline {
+    agent any // Exécute ce pipeline sur n'importe quel agent Jenkins disponible
+
+    environment {
+        DOCKER_BUILDKIT       = "1" // Active BuildKit : moteur de build Docker plus rapide et avec meilleur cache
+
+        // écrits dans apps/satisfaction/base/deployment-*.yaml
+        REGISTRY                = "amaldammak"                  // Nom d'utilisateur / namespace sur Docker Hub
+        IMAGE_BACKEND           = "satisfaction-core"            // Nom de l'image Docker du backend
+        IMAGE_FRONTEND          = "satisfaction-front"           // Nom de l'image Docker du frontend
+        BACKEND_DIR             = "evaluation-clinisys-core"     // Dossier source du backend dans le monorepo
+        FRONTEND_DIR            = "evaluation-clinisys-web"      // Dossier source du frontend dans le monorepo
+
+        DOCKERHUB_CREDENTIALS   = credentials('docker-hub-creds')
+        // Récupère les identifiants Jenkins "docker-hub-creds" et génère automatiquement
+        // DOCKERHUB_CREDENTIALS_USR (login) et DOCKERHUB_CREDENTIALS_PSW (mot de passe)
+
+        // ===== CD / GitOps =====
+        GITOPS_REPO_HOST    = "gitlab.clinisys.local:9999"                 // Hôte du dépôt Git GitOps
+        GITOPS_REPO_PATH    = "devops-stage/satisfaction-gitops.git"       // Chemin du dépôt GitOps
+        GITOPS_OVERLAY_DIR  = "apps/satisfaction/overlays/evaluation"      // Dossier Kustomize à modifier
+        GITOPS_CREDENTIALS  = credentials('gitops-ci-bot-creds')
+        // Identifiants du bot CI pour pousser sur le dépôt GitOps
+        // -> génère aussi GITOPS_CREDENTIALS_USR et GITOPS_CREDENTIALS_PSW
+    }
+
+    options {
+        disableConcurrentBuilds()               // Interdit l'exécution de plusieurs builds en parallèle (évite les conflits GitOps)
+        buildDiscarder(logRotator(numToKeepStr: '10')) // Ne conserve que les 10 derniers builds (logs/historique)
+        timestamps()                             // Ajoute un horodatage devant chaque ligne de log
+        timeout(time: 30, unit: 'MINUTES')       // Tue le build automatiquement au-delà de 30 minutes
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm // Récupère (clone/checkout) le code source selon la config SCM du job
+                script {
+                    // Base de comparaison pour détecter ce qui a changé :
+                    // le dernier commit qui a réussi (fourni par le plugin Git),
+                    // ou HEAD~1 en fallback (premier build, ou historique court).
+                    env.DIFF_BASE = sh(
+                        script: '''
+                            if [ -n "$GIT_PREVIOUS_SUCCESSFUL_COMMIT" ]; then
+                                echo "$GIT_PREVIOUS_SUCCESSFUL_COMMIT"
+                                # Utilise le commit du dernier build réussi comme référence
+                            else
+                                git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD
+                                # Sinon prend le commit précédent, ou HEAD si l'historique est trop court
+                            fi
+                        ''',
+                        returnStdout: true // Récupère la sortie du script shell dans une variable Groovy
+                    ).trim() // Supprime les espaces/retours à la ligne en trop
+
+                    env.BACKEND_CHANGED = sh(
+                        script: "git diff --name-only ${env.DIFF_BASE} HEAD -- ${BACKEND_DIR} | grep -q . && echo true || echo false",
+                        // Liste les fichiers modifiés dans BACKEND_DIR entre DIFF_BASE et HEAD ;
+                        // grep -q . teste s'il y a au moins un fichier changé ; traduit le résultat en true/false
+                        returnStdout: true
+                    ).trim()
+
+                    env.FRONTEND_CHANGED = sh(
+                        script: "git diff --name-only ${env.DIFF_BASE} HEAD -- ${FRONTEND_DIR} | grep -q . && echo true || echo false",
+                        // Même logique que ci-dessus, appliquée au dossier frontend
+                        returnStdout: true
+                    ).trim()
+
+                    // Version indépendante = nombre de commits ayant touché CE dossier.
+                    // N'augmente que si ce service précis change.
+                    env.BACKEND_TAG = "1.0.${sh(script: "git rev-list --count HEAD -- ${BACKEND_DIR}", returnStdout: true).trim()}"
+                    // Compte tous les commits ayant touché BACKEND_DIR depuis le début de l'historique
+                    // -> sert de numéro de patch pour un versionnement indépendant par service
+                    env.FRONTEND_TAG = "1.0.${sh(script: "git rev-list --count HEAD -- ${FRONTEND_DIR}", returnStdout: true).trim()}"
+                    // Idem pour le frontend
+
+                    echo "Backend changed: ${env.BACKEND_CHANGED} -> tag ${env.BACKEND_TAG}"   // Log informatif
+                    echo "Frontend changed: ${env.FRONTEND_CHANGED} -> tag ${env.FRONTEND_TAG}" // Log informatif
+                }
+            }
+        }
+
+        stage('Build Backend') {
+            when {
+                expression { env.BACKEND_CHANGED == 'true' } // Ce stage ne s'exécute que si le backend a changé
+            }
+            steps {
+                dir("${BACKEND_DIR}") { // Se place dans le dossier du backend pour le build
+                    sh "DOCKER_BUILDKIT=1 docker build -t ${REGISTRY}/${IMAGE_BACKEND}:${BACKEND_TAG} ."
+                    // Construit l'image Docker du backend à partir du Dockerfile local,
+                    // taguée avec registre/nom/version
+                }
+            }
+        }
+
+        stage('Build Frontend') {
+            when {
+                expression { env.FRONTEND_CHANGED == 'true' } // Ce stage ne s'exécute que si le frontend a changé
+            }
+            steps {
+                dir("${FRONTEND_DIR}") { // Se place dans le dossier du frontend pour le build
+                    sh "DOCKER_BUILDKIT=1 docker build -t ${REGISTRY}/${IMAGE_FRONTEND}:${FRONTEND_TAG} ."
+                    // Construit l'image Docker du frontend
+                }
+            }
+        }
+
+        stage('Push Images') {
+            // Seul un build sur master pousse en registry. Jamais de tag
+            when {
+                allOf {
+                    branch 'master' // Condition : seulement sur la branche master
+                    anyOf {
+                        expression { env.BACKEND_CHANGED == 'true' }  // ET au moins un service a changé
+                        expression { env.FRONTEND_CHANGED == 'true' }
+                    }
+                }
+            }
+            steps {
+                sh 'echo "$DOCKERHUB_CREDENTIALS_PSW" | docker login -u "$DOCKERHUB_CREDENTIALS_USR" --password-stdin'
+                // Authentification à Docker Hub ; le mot de passe est envoyé via stdin (plus sûr, n'apparaît pas dans les process/logs)
+                script {
+                    if (env.BACKEND_CHANGED == 'true') {
+                        sh "docker push ${REGISTRY}/${IMAGE_BACKEND}:${BACKEND_TAG}"
+                        // Pousse l'image backend vers Docker Hub, uniquement si elle a été reconstruite
+                    }
+                    if (env.FRONTEND_CHANGED == 'true') {
+                        sh "docker push ${REGISTRY}/${IMAGE_FRONTEND}:${FRONTEND_TAG}"
+                        // Pousse l'image frontend vers Docker Hub, uniquement si elle a été reconstruite
+                    }
+                }
+            }
+        }
+
+        // ============================================================
+        // ===== CD — GitOps : bump SEULEMENT le(s) service(s) modifié(s) =====
+        // ============================================================
+        stage('Update GitOps repo') {
+            when {
+                allOf {
+                    branch 'master'
+                    anyOf {
+                        expression { env.BACKEND_CHANGED == 'true' }
+                        expression { env.FRONTEND_CHANGED == 'true' }
+                    }
+                }
+            }
+            steps {
+                sh """
+                    set -e
+                    rm -rf gitops-checkout
+                    # Supprime un éventuel ancien clone du dépôt GitOps (nettoyage préventif)
+
+                    git clone "http://\${GITOPS_CREDENTIALS_USR}:\${GITOPS_CREDENTIALS_PSW}@${GITOPS_REPO_HOST}/${GITOPS_REPO_PATH}" gitops-checkout
+                    # Clone le dépôt GitOps en s'authentifiant via user:password dans l'URL HTTP
+                    # (\$ échappé pour que ce soit le shell, pas Groovy, qui interpole ces variables)
+
+                    cd gitops-checkout/${GITOPS_OVERLAY_DIR}
+                    # Se positionne dans l'overlay Kustomize concerné
+
+                    if ! command -v kustomize >/dev/null 2>&1; then
+                        # Vérifie si kustomize est déjà installé sur l'agent
+                        curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+                        # Sinon télécharge et exécute le script officiel d'installation de kustomize
+                        mv kustomize /usr/local/bin/kustomize
+                        # Déplace le binaire installé dans le PATH pour pouvoir l'appeler globalement
+                    fi
+                """
+                script {
+                    if (env.BACKEND_CHANGED == 'true') {
+                        sh """
+                            cd gitops-checkout/${GITOPS_OVERLAY_DIR}
+                            kustomize edit set image amaldammak/satisfaction-core=${REGISTRY}/${IMAGE_BACKEND}:${BACKEND_TAG}
+                            # Modifie kustomization.yaml pour pointer l'image backend vers la nouvelle version taguée
+                        """
+                    }
+                    if (env.FRONTEND_CHANGED == 'true') {
+                        sh """
+                            cd gitops-checkout/${GITOPS_OVERLAY_DIR}
+                            kustomize edit set image satisfaction-front=${REGISTRY}/${IMAGE_FRONTEND}:${FRONTEND_TAG}
+                            # Modifie kustomization.yaml pour pointer l'image frontend vers la nouvelle version taguée
+                        """
+                    }
+                }
+                sh """
+                    cd gitops-checkout/${GITOPS_OVERLAY_DIR}
+                    git config user.email "ci-bot@clinisys.local"
+                    # Configure l'email Git local (nécessaire pour pouvoir committer)
+                    git config user.name "ci-bot"
+                    # Configure le nom d'utilisateur Git local
+                    git add kustomization.yaml
+                    # Ajoute le fichier modifié à l'index Git
+
+                    if git diff --cached --quiet; then
+                        # Teste s'il y a des changements indexés (silencieux) ; vide = rien à committer
+                        echo "Aucun changement a committer."
+                    else
+                        git commit -m "ci: bump image(s) [backend=${env.BACKEND_CHANGED}:${BACKEND_TAG}] [frontend=${env.FRONTEND_CHANGED}:${FRONTEND_TAG}] (build #${env.BUILD_NUMBER})"
+                        # Commit avec un message récapitulatif (services changés + tags + n° de build)
+                        git push origin main
+                        # Pousse le commit vers le dépôt GitOps ; ArgoCD détectera ce changement automatiquement
+                        echo "satisfaction-gitops mis a jour. ArgoCD va synchroniser automatiquement."
+                    fi
+                """
+            }
+        }
+
+        stage('Verify ArgoCD sync') {
+            when {
+                allOf {
+                    branch 'master'
+                    anyOf {
+                        expression { env.BACKEND_CHANGED == 'true' }
+                        expression { env.FRONTEND_CHANGED == 'true' }
+                    }
+                }
+            }
+            steps {
+                sh """
+                    set +e
+                    # Désactive l'arrêt automatique en cas d'erreur, pour laisser la boucle continuer même si kubectl échoue temporairement
+                    for i in \$(seq 1 12); do
+                        # Boucle de 12 tentatives (avec 10s de pause entre chaque, ~2 minutes au total)
+                        STATUS=\$(kubectl get application satisfaction-evaluation -n argocd -o jsonpath='{.status.sync.status}' 2>/dev/null)
+                        # Récupère le statut de synchronisation ArgoCD (Synced / OutOfSync)
+                        HEALTH=\$(kubectl get application satisfaction-evaluation -n argocd -o jsonpath='{.status.health.status}' 2>/dev/null)
+                        # Récupère le statut de santé ArgoCD (Healthy / Progressing / etc.)
+                        echo "Sync: \${STATUS} | Health: \${HEALTH}"
+                        # Affiche l'état courant à chaque itération
+                        if [ "\$STATUS" = "Synced" ] && [ "\$HEALTH" = "Healthy" ]; then
+                            echo "Deploiement confirme : Synced/Healthy."
+                            exit 0
+                            # Sort immédiatement du script si le déploiement est confirmé
+                        fi
+                        sleep 10
+                        # Attend 10 secondes avant de réessayer
+                    done
+                    echo "ArgoCD n a pas confirme Synced/Healthy dans le delai imparti, verifier manuellement."
+                    exit 0
+                    # Ne fait pas échouer le build même si la confirmation n'a pas eu lieu (vérification informative seulement)
+                """
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Build reussi pour ${env.BRANCH_NAME}, build #${env.BUILD_NUMBER} — backend:${env.BACKEND_CHANGED == 'true' ? env.BACKEND_TAG : 'inchangé'}, frontend:${env.FRONTEND_CHANGED == 'true' ? env.FRONTEND_TAG : 'inchangé'}"
+            // Message récapitulatif si le pipeline réussit (opérateur ternaire : tag si changé, sinon "inchangé")
+        }
+        failure {
+            echo "Echec pour la branche ${env.BRANCH_NAME}, build #${env.BUILD_NUMBER}"
+            // Message en cas d'échec du pipeline
+        }
+        always {
+            sh 'docker logout || true'
+            // Se déconnecte de Docker Hub (|| true évite un échec du build si déjà déconnecté)
+            sh 'rm -rf gitops-checkout || true'
+            // Supprime le clone temporaire du dépôt GitOps
+            cleanWs()
+            // Nettoie complètement le workspace Jenkins (libère l'espace disque sur l'agent)
+        }
+    }
+}

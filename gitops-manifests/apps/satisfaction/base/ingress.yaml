@@ -1,0 +1,27 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: satisfaction-ingress
+  namespace: satisfaction-evaluation
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /satisfaction-core/$2
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: satisfaction.local
+      http:
+        paths:
+          - path: /satisfaction-core(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: satisfaction-core-svc
+                port:
+                  number: 8050
+          - path: /()(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: satisfaction-web-svc
+                port:
+                  number: 80
